@@ -11,6 +11,7 @@
 //!   `GITHUB_TOKEN`. Used by `hestia gc`.
 
 pub mod blob;
+pub mod rest;
 pub mod twirp;
 
 /// Errors shared by all GHA cache client modules.

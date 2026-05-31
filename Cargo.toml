@@ -25,6 +25,7 @@ zstd = "0.13"
 reqwest = { version = "0.13", default-features = false, features = [
   "rustls",
   "json",
+  "query",
 ] }
 axum = "0.8"
 
