@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - name: Check formatting
+        run: nix fmt -- --ci
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - name: Run tests
+        run: nix develop -c cargo test
+
+  # Phase 0 milestone: prove that the action wrapper makes the GHA cache
+  # tokens visible to shell steps and that the results endpoint is reachable.
+  # If this job fails, the whole project needs rethinking (see PLAN.md,
+  # Critical Constraint 1).
+  token-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./action
+      - name: Assert cache tokens are visible to shell steps
+        run: |
+          set -euo pipefail
+          if [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+            echo "ACTIONS_RUNTIME_TOKEN is empty; token capture failed" >&2
+            exit 1
+          fi
+          if [ -z "${ACTIONS_RESULTS_URL:-}" ]; then
+            echo "ACTIONS_RESULTS_URL is empty; token capture failed" >&2
+            exit 1
+          fi
+          echo "Both cache tokens captured successfully."
+      - name: Probe cache results endpoint
+        run: |
+          set -euo pipefail
+          # Any HTTP response (even 401/404) proves the endpoint is reachable;
+          # only a connection failure (curl reports 000) is an error.
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$ACTIONS_RESULTS_URL")
+          echo "GET $ACTIONS_RESULTS_URL -> HTTP $code"
+          if [ "$code" = "000" ]; then
+            echo "Could not reach $ACTIONS_RESULTS_URL" >&2
+            exit 1
+          fi
