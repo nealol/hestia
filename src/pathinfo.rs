@@ -163,12 +163,11 @@ impl StoreDatabase {
     ///
     /// Per-path problems (malformed, unknown) are reported as [`Lookup`]
     /// variants; only database-level failures are errors.
-    pub fn query_batch<I, S>(&self, store_paths: I) -> Result<Vec<(String, Lookup)>, Error>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let store_paths: Vec<String> = store_paths.into_iter().map(Into::into).collect();
+    pub fn query_batch(
+        &self,
+        store_paths: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<(String, Lookup)>, Error> {
+        let store_paths: Vec<String> = store_paths.into_iter().collect();
         if store_paths.is_empty() {
             // No queries -> no reason to require a database (callers may
             // legitimately have nothing buffered).

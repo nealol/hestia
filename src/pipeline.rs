@@ -135,11 +135,11 @@ pub async fn upload_pack(
     pack: &chunker::Pack,
 ) -> Result<bool, GhaError> {
     let key = pack.cache_key();
-    let data = Bytes::from(pack.data.clone());
 
     match twirp.create_cache_entry(&key).await? {
         Reservation::AlreadyExists => Ok(false),
         Reservation::Created { upload_url } => {
+            let data = Bytes::from(pack.data.clone());
             let key_clone = key.clone();
             blob::put_with_refresh(http, &upload_url, data, async move || {
                 // A pack upload outliving its SAS URL cannot be re-reserved

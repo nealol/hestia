@@ -346,13 +346,15 @@ impl ChunkFetcher {
         // Coalesce adjacent chunks into runs.
         let mut runs: Vec<Vec<(ChunkHash, ChunkLocation)>> = Vec::new();
         for (hash, location) in chunks {
-            let adjacent = runs.last().and_then(|run| run.last()).is_some_and(|last| {
-                last.1.offset + u64::from(last.1.compressed_size) == location.offset
-            });
-            if adjacent {
-                runs.last_mut().expect("non-empty").push((hash, location));
-            } else {
-                runs.push(vec![(hash, location)]);
+            match runs.last_mut() {
+                Some(run)
+                    if run.last().is_some_and(|(_, last)| {
+                        last.offset + u64::from(last.compressed_size) == location.offset
+                    }) =>
+                {
+                    run.push((hash, location));
+                }
+                _ => runs.push(vec![(hash, location)]),
             }
         }
 
