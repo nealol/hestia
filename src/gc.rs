@@ -491,7 +491,11 @@ pub fn plan(
             let Some(pack) = observation.pack else {
                 return false;
             };
+            // `created == 0` means the REST timestamp did not parse: the
+            // entry's age is unknown, so treat it as too young to judge
+            // (it could be a concurrent push's just-uploaded pack).
             !manifest.packs.contains_key(&pack)
+                && observation.created != 0
                 && now.saturating_sub(observation.created) > policy.min_age
         })
         .map(|observation| observation.key.clone())
@@ -956,7 +960,12 @@ impl GcContext {
         for (index, entry) in indexed {
             // Keep the newest version; older ones must also be old enough
             // that no in-flight reader still holds their download URL.
-            let age = now.saturating_sub(entry.created_unix().unwrap_or(0));
+            // An unparsable timestamp means the age is unknown: skip the
+            // entry rather than judging it infinitely old.
+            let Some(created) = entry.created_unix() else {
+                continue;
+            };
+            let age = now.saturating_sub(created);
             if index < newest
                 && age > self.policy.min_age
                 && !self.rest.delete_by_key(&entry.key).await?.is_empty()
@@ -1576,6 +1585,37 @@ mod tests {
 
         let plan = plan(&manifest, &observations, NOW, &policy());
         assert_eq!(plan.orphan_keys, vec![pack_cache_key(&pack_hash(9))]);
+    }
+
+    #[test]
+    fn packs_with_unparsable_timestamps_are_never_orphans() {
+        // PackObservation records `created: 0` when the REST API timestamp
+        // does not parse (the parser is hand-rolled; an API format change
+        // must not turn into data loss). An unknown age has to be judged
+        // "too young to touch", not "infinitely old": the entry could be a
+        // concurrent push's just-uploaded pack, and deleting it would leave
+        // that push's committed manifest referencing a missing pack.
+        let manifest = ManifestBuilder::new()
+            .pack(1, TIER_VOLATILE, NOW - SECS_PER_DAY)
+            .chunk(1, 1, 100, 0)
+            .path(1, &[1], &[], NOW, NOW)
+            .root("main", &[1], NOW)
+            .build();
+
+        let mut observations = observe_all(&manifest, NOW);
+        observations.push(PackObservation {
+            key: pack_cache_key(&pack_hash(9)),
+            pack: Some(pack_hash(9)),
+            created: 0,
+            last_accessed: 0,
+        });
+
+        let plan = plan(&manifest, &observations, NOW, &policy());
+        assert!(
+            plan.orphan_keys.is_empty(),
+            "a pack of unknown age must never be judged an orphan: {:?}",
+            plan.orphan_keys
+        );
     }
 
     #[test]
