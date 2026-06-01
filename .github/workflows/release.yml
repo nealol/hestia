@@ -9,6 +9,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual dry runs: build the binaries without creating a release, so the
+  # build can be debugged without re-pushing tags.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,21 +31,41 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
-      - uses: NixOS/nix-installer-action@main
-      # The arm64 hosted runners have 16 GB RAM and no swap; parallel rustc
-      # invocations during the static build have OOM-killed the runner VM
-      # (it reports "received a shutdown signal" mid-build). Swap turns the
-      # spike into slowdown instead of a dead runner. The x86_64 runners
-      # already ship a /swapfile, so use a separate path and keep the step
-      # idempotent.
-      - name: Add swap
+      # The hosted runners (especially arm64) have little free disk; the
+      # musl cross toolchain plus the cargo build fills the root filesystem
+      # and the runner agent dies with "received a shutdown signal".
+      # Removing preinstalled toolchains we never use frees several GB.
+      - name: Free disk space
         run: |
-          sudo fallocate -l 8G /swapfile-hestia
-          sudo chmod 600 /swapfile-hestia
-          sudo mkswap /swapfile-hestia
-          sudo swapon /swapfile-hestia
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/share/boost /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            "$AGENT_TOOLSDIRECTORY" || true
+      # Swap absorbs rustc memory spikes that previously OOM-killed the
+      # 16 GB runner VMs. zram is compressed RAM-backed swap: unlike a disk
+      # swapfile it costs zero disk space (an 8 GB /swapfile made the
+      # disk-exhaustion failure above strictly worse).
+      - name: Enable zram swap
+        run: |
+          sudo modprobe zram
+          echo 8G | sudo tee /sys/block/zram0/disksize
+          sudo mkswap /dev/zram0
+          sudo swapon -p 100 /dev/zram0
+      - uses: NixOS/nix-installer-action@main
+      - name: Resource diagnostics
+        run: |
+          df -h
+          free -h
+          swapon --show
       - name: Build static binary
-        run: nix build .#static
+        run: |
+          # Background monitor: if the runner dies mid-build, the last
+          # samples in the log show whether disk or memory ran out.
+          (while true; do
+            echo "--- monitor $(date -u +%T) ---"; df -h /; free -m
+            sleep 15
+          done) &
+          trap 'kill %1' EXIT
+          nix build .#static --cores 2
       - name: Prepare release asset
         run: |
           set -euo pipefail
@@ -58,6 +81,8 @@ jobs:
 
   release:
     needs: build
+    # workflow_dispatch runs are dry runs: build only, no release.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       # Creating the release and uploading assets.
