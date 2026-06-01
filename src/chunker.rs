@@ -50,10 +50,6 @@ pub enum Error {
     MissingChunk(ChunkHash),
 }
 
-// ---------------------------------------------------------------------------
-// Chunking
-// ---------------------------------------------------------------------------
-
 /// One content-defined chunk of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -86,10 +82,6 @@ pub fn chunk_data(data: &Bytes) -> Vec<Chunk> {
     })
     .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Pack assembly
-// ---------------------------------------------------------------------------
 
 /// Position of one chunk inside a pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,10 +210,6 @@ impl Pack {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// NAR integration: walk a store path, chunk every file, build the tree
-// ---------------------------------------------------------------------------
 
 /// A node of the manifest file tree (convenience alias).
 pub type TreeNode = FileSystemObject<ChunkList, Box<FileTree<ChunkList>>>;
@@ -422,14 +410,11 @@ pub fn flatten_tree(tree: &FileTree<ChunkList>) -> Vec<(String, &TreeNode)> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// NAR replay: tree + chunk data -> NAR bytes -> hash
-//
-// This is the read-side serialization path: the Phase 4 substituter rebuilds
-// NARs from the manifest tree + fetched chunks exactly like this. Using it on
-// the write side to compute nar_hash means a path's stored representation is
-// proven to reproduce the original NAR before anything is uploaded.
-// ---------------------------------------------------------------------------
+// NAR replay (tree + chunk data -> NAR bytes -> hash) is the read-side
+// serialization path: the substituter rebuilds NARs from the manifest tree +
+// fetched chunks exactly like this. Using it on the write side to compute
+// nar_hash means a path's stored representation is proven to reproduce the
+// original NAR before anything is uploaded.
 
 /// Tokio `AsyncWrite` sink that hashes and counts bytes instead of storing
 /// them.

@@ -31,10 +31,6 @@ pub enum Error {
     Compression(#[from] std::io::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Hash types
-// ---------------------------------------------------------------------------
-
 /// A 32-byte SHA-256 digest (chunk hash, pack hash, or NAR hash).
 ///
 /// Serialized as a CBOR byte string (33 bytes on the wire) instead of an
@@ -152,10 +148,6 @@ impl<'de> Deserialize<'de> for PathHash {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Manifest schema
-// ---------------------------------------------------------------------------
-
 /// Ordered chunks making up one regular file.
 ///
 /// A struct with a named field (not a tuple) because harmonia's
@@ -243,14 +235,10 @@ pub struct Manifest {
     pub roots: BTreeMap<String, Root>,
 }
 
-// ---------------------------------------------------------------------------
-// Merge rules
-// ---------------------------------------------------------------------------
-//
-// Concurrent CI jobs produce concurrent manifest versions; SaveMutable
-// resolves the write conflict, but the loser must re-merge its changes on
-// top of the winner's. All merge operations are commutative and idempotent
-// so the result does not depend on who wins the race.
+// Merge rules: concurrent CI jobs produce concurrent manifest versions;
+// SaveMutable resolves the write conflict, but the loser must re-merge its
+// changes on top of the winner's. All merge operations are commutative and
+// idempotent so the result does not depend on who wins the race.
 
 impl PathEntry {
     /// Manifest keys of all referenced paths (used by the reachability
@@ -346,10 +334,6 @@ fn merge_map<K: Ord, V>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reachability + liveness
-// ---------------------------------------------------------------------------
-
 impl Manifest {
     /// Merge another manifest into this one (see merge rules above).
     pub fn merge(mut self, other: Manifest) -> Manifest {
@@ -399,10 +383,6 @@ impl Manifest {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Codec: CBOR + zstd
-// ---------------------------------------------------------------------------
 
 /// zstd level for manifest compression. The manifest is small (tens of KB);
 /// favor ratio over speed.
@@ -685,10 +665,6 @@ mod tests {
         assert_eq!(hash, parsed);
     }
 
-    // -----------------------------------------------------------------------
-    // Merge, reachability, liveness
-    // -----------------------------------------------------------------------
-
     fn entry_with_refs(seed: u8, references: Vec<StorePath>, last_pushed: u64) -> PathEntry {
         PathEntry {
             references,
@@ -885,10 +861,6 @@ mod tests {
         assert_eq!(manifest.paths[&path_hash(1)].last_reachable, 7777);
         assert_eq!(manifest.paths[&path_hash(2)].last_reachable, 0);
     }
-
-    // -----------------------------------------------------------------------
-    // Property-based tests: merge laws
-    // -----------------------------------------------------------------------
 
     mod merge_properties {
         use super::*;
