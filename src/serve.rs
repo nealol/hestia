@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::cli::ServeArgs;
@@ -50,6 +50,15 @@ use crate::upstream::UpstreamFilter;
 
 /// How often the idle-exit timer checks for inactivity.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Upper bound for one request line on the hook socket.
+///
+/// The largest legitimate request is an Add carrying one build's
+/// `$OUT_PATHS`; even thousands of paths fit in well under a megabyte.
+/// The cap exists so a misbehaving client (or something that is not a
+/// hestia client at all) connecting to the socket cannot make the daemon
+/// buffer an unbounded line in memory.
+const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Shared state of a running daemon.
 struct DaemonState {
@@ -266,9 +275,27 @@ async fn handle_connection(state: &DaemonState, stream: UnixStream) -> std::io::
     let mut line = String::new();
     loop {
         line.clear();
-        let read = stream.read_line(&mut line).await?;
+        // Bound how much one request line may buffer: `take` makes
+        // `read_line` stop at the cap as if the stream had ended there.
+        let read = (&mut stream)
+            .take(MAX_REQUEST_BYTES)
+            .read_line(&mut line)
+            .await?;
         if read == 0 {
             return Ok(()); // client hung up
+        }
+        if read as u64 == MAX_REQUEST_BYTES && !line.ends_with('\n') {
+            // The cap was hit before a newline: oversized request. Answer
+            // with an error and drop the connection (the rest of the line
+            // is still in flight, so there is no way to resync to the next
+            // request on this stream).
+            let response = Response::error(format!(
+                "request exceeds {MAX_REQUEST_BYTES} bytes; rejected"
+            ));
+            let encoded = encode_line(&response).map_err(std::io::Error::other)?;
+            stream.get_mut().write_all(&encoded).await?;
+            stream.get_mut().flush().await?;
+            return Ok(());
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => state.handle_request(request).await,

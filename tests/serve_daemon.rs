@@ -346,6 +346,81 @@ async fn failed_drain_keeps_paths_buffered_for_retry() {
 }
 
 #[tokio::test]
+async fn oversized_hook_request_is_rejected_with_bounded_memory() {
+    // The hook socket is reachable by anything that can open the socket
+    // file (and clients are not necessarily hestia: a stray process can
+    // connect and write garbage). A request line must not be buffered
+    // without bound: the daemon has to stop reading after a fixed cap and
+    // drop the connection, instead of accumulating an endless line in
+    // memory until the runner OOMs.
+    let test = async {
+        let fake = FakeGha::start().await;
+        let http = reqwest::Client::new();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("hook.sock");
+
+        // No store database needed: the malformed request never reaches the
+        // pipeline.
+        let daemon = RunningDaemon::start(
+            socket.clone(),
+            None,
+            pipeline_context(&fake, &http, StoreDatabase::new("/nonexistent/db.sqlite")),
+        )
+        .await;
+
+        // Stream a single line far larger than any legitimate request
+        // (every Add request carries one build's $OUT_PATHS; even thousands
+        // of paths are well under a megabyte). 64 MiB, never a newline.
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::UnixStream::connect(&socket)
+            .await
+            .expect("connecting to hook socket failed");
+        let chunk = vec![b'a'; 1024 * 1024];
+        let mut write_failed = false;
+        for _ in 0..64 {
+            if stream.write_all(&chunk).await.is_err() {
+                // The daemon cut the connection: exactly what we want.
+                write_failed = true;
+                break;
+            }
+        }
+
+        if !write_failed {
+            // The daemon accepted everything written so far. It must now
+            // either respond with an error or close the connection -- not
+            // keep reading (and buffering) forever.
+            let mut response = Vec::new();
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response))
+                    .await;
+            assert!(
+                outcome.is_ok(),
+                "daemon must reject an oversized request instead of \
+                 buffering it in memory indefinitely"
+            );
+            if let Ok(Ok(read)) = outcome
+                && read > 0
+            {
+                let text = String::from_utf8_lossy(&response);
+                assert!(
+                    text.contains("\"ok\":false"),
+                    "oversized requests must be answered with an error, got: {text}"
+                );
+            }
+        }
+        drop(stream);
+
+        // The daemon survived and still serves well-formed requests.
+        let status = daemon.request(&Request::Status).await;
+        assert_eq!(status.buffered, Some(0));
+        let _ = daemon.stop().await;
+    };
+    tokio::time::timeout(Duration::from_secs(60), test)
+        .await
+        .expect("test timed out: daemon hung on an oversized request");
+}
+
+#[tokio::test]
 async fn drain_cli_binary_reports_stats_and_exits_zero() {
     let Some(store) = ScratchStore::create() else {
         return;
