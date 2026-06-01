@@ -11,9 +11,12 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Duration;
 
-use hestia::chunker::pack_cache_key;
+use hestia::chunker::{flatten_tree, pack_cache_key};
 use hestia::gc::{GcPolicy, RepackOutput, SECS_PER_DAY, SECS_PER_HOUR, TIER_STABLE};
+use hestia::gha::Error as GhaError;
+use hestia::gha::savemutable::SaveMutable;
 use hestia::manifest::{FileSystemObject, Manifest, PackHash};
+use hestia::pipeline::MANIFEST_PREFIX;
 
 use support::fake_gha::FakeGha;
 use support::sim::{SimCache, SimPath, last_accessed, one_byte_reads};
@@ -172,6 +175,91 @@ async fn repack_copies_live_chunks_and_deletes_old_pack_after_commit() {
         // substituter; the dead one is a clean 404.
         sim.assert_readable(&[&small]).await;
         sim.assert_unavailable(&[&big]).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn truncated_pack_fails_repack_with_an_error_not_a_panic() {
+    timed(async {
+        let fake = FakeGha::start().await;
+        let http = client();
+        let sim = SimCache::new(&fake, &http);
+
+        // One pack: big-app's chunks first, small-lib's chunks at the end.
+        let big = SimPath::new("big-app", 1, 200_000);
+        let small = SimPath::new("small-lib", 2, 40_000);
+        fake.set_clock(T0);
+        sim.push(
+            "main",
+            &[big.clone(), small.clone()],
+            &[big.clone(), small.clone()],
+            T0,
+        )
+        .await;
+
+        // Corrupt the manifest: small's last chunk (the last frame in the
+        // pack blob) claims more compressed bytes than the blob holds.
+        // The cache is lossy and its contents are untrusted; the same short
+        // read happens when a pack blob is truncated. The repack Range read
+        // then comes back shorter than requested.
+        let save = SaveMutable::new(&sim.twirp, &sim.http, MANIFEST_PREFIX);
+        save.save(|existing| {
+            let entry = existing.expect("manifest exists");
+            let mut manifest = Manifest::decode(&entry.data)
+                .map_err(|err| GhaError::InvalidResponse(err.to_string()))?;
+            let small_chunks: Vec<_> = flatten_tree(&manifest.paths[&small.path_hash()].tree)
+                .into_iter()
+                .filter_map(|(_, node)| match node {
+                    FileSystemObject::Regular(regular) => Some(regular.contents.chunks.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            let last = small_chunks
+                .iter()
+                .max_by_key(|chunk| manifest.chunks[chunk].offset)
+                .copied()
+                .expect("small has chunks");
+            // small's chunks sit at the end of the pack, so extending the
+            // last one reaches past the end of the blob.
+            let location = manifest.chunks.get_mut(&last).expect("chunk located");
+            location.compressed_size += 50_000;
+            manifest
+                .encode()
+                .map_err(|err| GhaError::InvalidResponse(err.to_string()))
+        })
+        .await
+        .expect("tampered manifest commit");
+
+        // 20 days later big is dead -> the pack is mostly dead -> GC plans a
+        // repack that must Range-read small's (corrupted) chunk run.
+        let t1 = T0 + 20 * DAY;
+        fake.set_clock(t1);
+        sim.push("main", &[], std::slice::from_ref(&small), t1)
+            .await;
+
+        let gc = sim.gc(GcPolicy::default());
+        let result = gc.run(false, t1).await;
+
+        // Untrusted cache contents must surface as an error (GC fails
+        // loudly, commits nothing, deletes nothing), never as a panic.
+        assert!(
+            result.is_err(),
+            "GC must fail cleanly on a short pack read, got {result:?}"
+        );
+
+        // Nothing was committed or deleted: the original pack still exists
+        // and the manifest still references it.
+        let manifest = sim.manifest().await;
+        assert_eq!(manifest.packs.len(), 1);
+        let pack = *manifest.packs.keys().next().unwrap();
+        assert!(
+            sim.stored_pack_keys()
+                .await
+                .contains(&pack_cache_key(&pack)),
+            "the source pack must not be deleted by a failed GC run"
+        );
     })
     .await;
 }

@@ -763,6 +763,20 @@ impl GcContext {
                     let data = self.read_pack_range(&source, &url, start..end).await?;
                     output.downloaded += data.len() as u64;
 
+                    // The cache is lossy and its contents are untrusted: a
+                    // pack shorter than the manifest claims (truncated blob,
+                    // corrupt chunk location) returns a short Range read.
+                    // That must surface as an error, not as a slice panic.
+                    let expected = usize::try_from(end - start).expect("chunk run fits in memory");
+                    if data.len() != expected {
+                        return Err(Error::Gha(GhaError::InvalidResponse(format!(
+                            "pack {source}: range read {start}..{end} returned {} bytes, \
+                             expected {expected}; the pack is truncated or the manifest \
+                             chunk locations are corrupt",
+                            data.len()
+                        ))));
+                    }
+
                     for copy in run {
                         let from = (copy.from.offset - start) as usize;
                         let to = from + copy.from.compressed_size as usize;
