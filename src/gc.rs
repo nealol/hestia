@@ -98,7 +98,7 @@ impl Default for GcPolicy {
 }
 
 /// Parse a `pack-<sha256 hex>` cache key back into the pack hash.
-pub fn parse_pack_key(key: &str) -> Option<PackHash> {
+fn parse_pack_key(key: &str) -> Option<PackHash> {
     let hex = key.strip_prefix("pack-")?;
     if hex.len() != 64 {
         return None;
@@ -125,7 +125,7 @@ pub struct PackObservation {
 }
 
 impl PackObservation {
-    pub fn from_entry(entry: &CacheEntry) -> Self {
+    fn from_entry(entry: &CacheEntry) -> Self {
         Self {
             pack: parse_pack_key(&entry.key),
             key: entry.key.clone(),
@@ -154,18 +154,14 @@ pub struct RepackJob {
 }
 
 impl RepackJob {
-    /// Compressed bytes that must be Range-read from source packs.
+    /// Compressed bytes that must be Range-read from source packs. Frames
+    /// are copied without recompression, so this is also the size of the
+    /// output pack.
     pub fn download_bytes(&self) -> u64 {
         self.copies
             .iter()
             .map(|copy| u64::from(copy.from.compressed_size))
             .sum()
-    }
-
-    /// Compressed bytes the output pack will hold (frames are copied
-    /// without recompression, so this equals the download size).
-    pub fn upload_bytes(&self) -> u64 {
-        self.download_bytes()
     }
 }
 
@@ -202,12 +198,9 @@ impl GcPlan {
         self.repack_jobs.iter().map(RepackJob::download_bytes).sum()
     }
 
-    pub fn upload_bytes(&self) -> u64 {
-        self.repack_jobs.iter().map(RepackJob::upload_bytes).sum()
-    }
-
     /// One-line human summary for logs and `--dry-run`.
     pub fn summary(&self) -> String {
+        // Repacks copy compressed frames verbatim, so upload == download.
         format!(
             "evicted {} pack(s); heal {} path(s); drop {} root(s) + {} path(s); \
              repack {} job(s) ({} chunk(s), {} B down, {} B up); \
@@ -222,7 +215,7 @@ impl GcPlan {
                 .map(|job| job.copies.len())
                 .sum::<usize>(),
             self.download_bytes(),
-            self.upload_bytes(),
+            self.download_bytes(),
             self.touch_packs.len(),
             self.delete_packs.len(),
             self.orphan_keys.len(),
