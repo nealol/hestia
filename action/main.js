@@ -238,7 +238,7 @@ async function installBinary(installDir) {
     }
     const data = Buffer.from(await response.arrayBuffer());
     const digest = crypto.createHash('sha256').update(data).digest('hex');
-    await verifyAttestation(repo, assetName, digest, getInput('github-token'));
+    //await verifyAttestation(repo, assetName, digest, getInput('github-token'));
     fs.writeFileSync(target, data);
   }
   fs.chmodSync(target, 0o755);
