@@ -241,6 +241,63 @@ impl TwirpClient {
         }
     }
 
+    /// Like [`TwirpClient::call`], but tolerant of a 2xx response whose body
+    /// is empty or not the expected JSON shape: it falls back to
+    /// `Resp::default()` instead of failing.
+    ///
+    /// This exists for `FinalizeCacheEntryUpload`: some transparent cache
+    /// proxies (e.g. Blacksmith's runners) answer a successful finalize with
+    /// an empty or non-JSON 2xx body. Hestia does not consume the returned
+    /// `entry_id` — [`TwirpClient::upload_and_finalize`] calls
+    /// [`TwirpClient::finalize_upload`] and discards the id — so a malformed
+    /// success body must not fail an otherwise-successful upload.
+    async fn call_tolerant<Req, Resp>(&self, method: &str, request: &Req) -> Result<Resp, Error>
+    where
+        Req: Serialize,
+        Resp: DeserializeOwned + Default,
+    {
+        let url = rpc_url(&self.base_url, method);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(request)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status.is_success() {
+            // Fall back to the default on an empty or unparseable body rather
+            // than failing the whole finalize: the response is only used to
+            // confirm success, and the entry id is discarded by callers.
+            let bytes = response.bytes().await.unwrap_or_default();
+            if bytes.is_empty() {
+                return Ok(Resp::default());
+            }
+            return Ok(serde_json::from_slice(&bytes).unwrap_or_default());
+        }
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::TokenExpired {
+                method: method.to_string(),
+            });
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        match serde_json::from_str::<TwirpErrorBody>(&body) {
+            Ok(twirp_err) if !twirp_err.code.is_empty() => Err(Error::Twirp {
+                method: method.to_string(),
+                code: twirp_err.code,
+                msg: twirp_err.msg,
+            }),
+            _ => Err(Error::Status {
+                status: status.as_u16(),
+                url,
+                body,
+            }),
+        }
+    }
+
     /// Reserve `key` for upload (Twirp `CreateCacheEntry`).
     pub async fn create_cache_entry(&self, key: &str) -> Result<Reservation, Error> {
         let request = CreateCacheEntryRequest {
@@ -304,7 +361,10 @@ impl TwirpClient {
         let response: FinalizeCacheEntryUploadResponse = loop {
             attempts += 1;
             match self
-                .call::<_, FinalizeCacheEntryUploadResponse>("FinalizeCacheEntryUpload", &request)
+                .call_tolerant::<_, FinalizeCacheEntryUploadResponse>(
+                    "FinalizeCacheEntryUpload",
+                    &request,
+                )
                 .await
             {
                 Err(err) if err.is_not_found() && attempts < FINALIZE_MAX_ATTEMPTS => {
@@ -314,6 +374,14 @@ impl TwirpClient {
             }
         };
         if !response.ok {
+            // A tolerant parse fell back to the default (`ok=false`); the body
+            // was empty or unparseable but the HTTP status was 2xx, so treat
+            // that as a successful finalize rather than a protocol violation.
+            // The real service always sets ok=true on success, but a proxy may
+            // omit the body entirely, and we only need to know it succeeded.
+            if response.entry_id.is_empty() {
+                return Ok(String::new());
+            }
             return Err(Error::InvalidResponse(format!(
                 "FinalizeCacheEntryUpload for {key} returned ok=false"
             )));
@@ -516,5 +584,30 @@ mod tests {
             msg: "cache entry not found".into(),
         };
         assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn finalize_response_default_is_empty_so_tolerant_fallback_is_safe() {
+        // `call_tolerant` falls back to `FinalizeCacheEntryUploadResponse::default()`
+        // when a 2xx body is empty or non-JSON (e.g. Blacksmith's transparent
+        // cache proxy). `finalize_upload` then treats an empty `entry_id` as
+        // success. This test pins the contract: the default must have an empty
+        // `entry_id` (and `ok=false`), so the tolerant path is distinguishable
+        // from a genuine `ok=false` with a populated id.
+        let default = FinalizeCacheEntryUploadResponse::default();
+        assert!(!default.ok);
+        assert!(default.entry_id.is_empty());
+
+        // A non-JSON body must not panic the tolerant parse: it yields the
+        // default rather than an error, mirroring `call_tolerant`'s
+        // `unwrap_or_default()` on the deserialization path.
+        let parsed: FinalizeCacheEntryUploadResponse =
+            serde_json::from_str("not json at all").unwrap_or_default();
+        assert!(parsed.entry_id.is_empty());
+
+        // An empty body must likewise yield the default.
+        let parsed: FinalizeCacheEntryUploadResponse =
+            serde_json::from_str("").unwrap_or_default();
+        assert!(parsed.entry_id.is_empty());
     }
 }
