@@ -606,8 +606,7 @@ mod tests {
         assert!(parsed.entry_id.is_empty());
 
         // An empty body must likewise yield the default.
-        let parsed: FinalizeCacheEntryUploadResponse =
-            serde_json::from_str("").unwrap_or_default();
+        let parsed: FinalizeCacheEntryUploadResponse = serde_json::from_str("").unwrap_or_default();
         assert!(parsed.entry_id.is_empty());
     }
 }
